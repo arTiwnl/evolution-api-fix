@@ -9,7 +9,6 @@ Este é um fork do [Evolution API](https://github.com/EvolutionAPI/evolution-api
 
 ```
 artiwnl/evolution-api:fixed
-artiwnl/evolution-api:2.3.7-fixed
 ```
 
 Já inclui o Manager corrigido embutido em `/manager`.
@@ -109,9 +108,3 @@ Correções em [`evolution-manager-v2`](./evolution-manager-v2):
 8. **Exclusão de bots (Typebot/OpenAI/Dify/N8n/EvolutionBot/Flowise/Evoai) falhava em silêncio** — erro só ia pro console, sem avisar o usuário.
 9. **Redirecionamento errado após login** — usuário já autenticado acessando `/manager/login` caía na página de marketing (`/`) em vez do dashboard (`/manager/`).
 10. **Aviso de versão do Baileys** — novo componente que avisa (com link pro changelog) quando o Baileys do servidor está desatualizado, ou confirma quando está em dia.
-
----
-
-## Créditos
-
-Correções feitas com apoio do Claude Code, a partir de auditoria de código e testes contra ambiente real (Postgres, Redis e build de produção via Docker).
