@@ -448,19 +448,29 @@ export class ChannelStartupService {
 
     const instanceApikey = this.token || 'Apikey not found';
 
-    await eventManager.emit({
-      instanceName: this.instance.name,
-      origin: ChannelStartupService.name,
-      event,
-      data,
-      serverUrl,
-      dateTime: now,
-      sender: this.wuid,
-      apiKey: expose && instanceApikey ? instanceApikey : null,
-      local,
-      integration,
-      extra,
-    });
+    try {
+      await eventManager.emit({
+        instanceName: this.instance.name,
+        origin: ChannelStartupService.name,
+        event,
+        data,
+        serverUrl,
+        dateTime: now,
+        sender: this.wuid,
+        apiKey: expose && instanceApikey ? instanceApikey : null,
+        local,
+        integration,
+        extra,
+      });
+    } catch (error) {
+      // Callers do not await sendDataWebhook; catch here so a failed dispatch
+      // is logged instead of becoming a silent unhandled rejection.
+      this.logger.error({
+        local: `${ChannelStartupService.name}.sendDataWebhook`,
+        message: `Failed to emit event ${event}: ${error?.message}`,
+        stack: error?.stack,
+      });
+    }
   }
 
   // Check if the number is MX or AR

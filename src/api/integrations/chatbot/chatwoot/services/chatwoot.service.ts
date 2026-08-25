@@ -116,11 +116,12 @@ export class ChatwootService {
     if (data.autoCreate) {
       this.logger.log('Auto create chatwoot instance');
       const urlServer = this.configService.get<HttpServer>('SERVER').URL;
+      const instanceToken = this.waMonitor.waInstances[instance.instanceName]?.token;
 
       await this.initInstanceChatwoot(
         instance,
         data.nameInbox ?? instance.instanceName.split('-cwId-')[0],
-        `${urlServer}/chatwoot/webhook/${encodeURIComponent(instance.instanceName)}`,
+        `${urlServer}/chatwoot/webhook/${encodeURIComponent(instance.instanceName)}?apikey=${encodeURIComponent(instanceToken)}`,
         true,
         data.number,
         data.organization,
@@ -346,9 +347,17 @@ export class ChatwootService {
 
       return contact;
     } catch (error) {
-      if ((error.status === 422 || error.response?.status === 422) && jid) {
-        this.logger.warn(`Contact with identifier ${jid} creation failed (422). Checking if it already exists...`);
-        const existingContact = await this.findContactByIdentifier(instance, jid);
+      if (error.status === 422 || error.response?.status === 422) {
+        this.logger.warn(`Contact creation failed (422) for ${jid || phoneNumber}. Checking if it already exists...`);
+
+        // Chatwoot only enforces uniqueness on `identifier`, not `phone_number` - a
+        // 422 conflict can therefore come from either. Check both before giving up,
+        // otherwise near-simultaneous creates for the same number (e.g. the same
+        // person messaging from two different groups) can end up as two contacts.
+        const existingContact =
+          (jid && (await this.findContactByIdentifier(instance, jid))) ||
+          (await this.findContact(instance, phoneNumber));
+
         if (existingContact) {
           const contactId = existingContact.id;
           await this.addLabelToContact(this.provider.nameInbox, contactId);
@@ -689,6 +698,28 @@ export class ChatwootService {
           this.cache.delete(cacheKey);
           return await this.createConversation(instance, body);
         }
+
+        if (conversationExists.status === 'resolved') {
+          if (this.provider.reopenConversation) {
+            this.logger.verbose(`Reopening resolved conversation ID: ${conversationId}`);
+            await client.conversations.toggleStatus({
+              accountId: this.provider.accountId,
+              conversationId,
+              data: { status: this.provider.conversationPending ? 'pending' : 'open' },
+            });
+          } else {
+            // Same rule as the cache-miss path: a resolved conversation isn't reused
+            // when reopenConversation is off, so a new one gets created instead of
+            // silently attaching new messages to a closed conversation no one is
+            // looking at.
+            this.logger.verbose(
+              'Conversation is resolved and reopenConversation is off, re-calling createConversation',
+            );
+            this.cache.delete(cacheKey);
+            return await this.createConversation(instance, body);
+          }
+        }
+
         return conversationId;
       }
 
@@ -733,8 +764,20 @@ export class ChatwootService {
           const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(chatId);
           this.logger.verbose(`Group metadata: JID:${group.JID} - Subject:${group?.subject || group?.Name}`);
 
-          const participantJid = isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant;
+          // A group message the instance itself sent directly from the phone/WhatsApp
+          // app (not through the API) has `fromMe: true` but no `participant` field -
+          // that field only exists on messages received from other group members.
+          // Fall back to the instance's own JID so this doesn't crash and the message
+          // still ends up attributed to someone real in Chatwoot.
+          const participantJid =
+            (isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant) ||
+            this.waMonitor.waInstances[instance.instanceName]?.wuid;
           nameContact = `${group.subject} (GROUP)`;
+
+          if (!participantJid) {
+            this.logger.warn(`Could not resolve a participant JID for group message in ${chatId}, skipping sync`);
+            return null;
+          }
 
           const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(
             participantJid.split('@')[0],
@@ -1278,30 +1321,41 @@ export class ChatwootService {
     }
 
     if (error && error?.status === 400 && error?.message[0]?.exists === false) {
-      client.messages.create({
-        accountId: this.provider.accountId,
-        conversationId: conversation,
-        data: {
-          content: `${i18next.t('cw.message.numbernotinwhatsapp')}`,
-          message_type: 'outgoing',
-          private: true,
-        },
-      });
+      try {
+        await client.messages.create({
+          accountId: this.provider.accountId,
+          conversationId: conversation,
+          data: {
+            content: `${i18next.t('cw.message.numbernotinwhatsapp')}`,
+            message_type: 'outgoing',
+            private: true,
+          },
+        });
+      } catch (notifyError) {
+        // If this notification itself fails, the operator loses their only signal
+        // that the original send failed - at least log it instead of an unhandled
+        // rejection disappearing silently.
+        this.logger.error(`Failed to notify Chatwoot of send failure: ${notifyError}`);
+      }
 
       return;
     }
 
-    client.messages.create({
-      accountId: this.provider.accountId,
-      conversationId: conversation,
-      data: {
-        content: i18next.t('cw.message.notsent', {
-          error: error ? `_${error.toString()}_` : '',
-        }),
-        message_type: 'outgoing',
-        private: true,
-      },
-    });
+    try {
+      await client.messages.create({
+        accountId: this.provider.accountId,
+        conversationId: conversation,
+        data: {
+          content: i18next.t('cw.message.notsent', {
+            error: error ? `_${error.toString()}_` : '',
+          }),
+          message_type: 'outgoing',
+          private: true,
+        },
+      });
+    } catch (notifyError) {
+      this.logger.error(`Failed to notify Chatwoot of send failure: ${notifyError}`);
+    }
   }
 
   public async receiveWebhook(instance: InstanceDto, body: any) {
@@ -1550,7 +1604,13 @@ export class ChatwootService {
                 equals: false,
               },
               instanceId: instance.instanceId,
+              // Scope to this specific conversation - without this, an unrelated
+              // conversation's message (often a stale/old one, since there's no
+              // ordering either) could get marked as read instead of the one the
+              // agent is actually replying to.
+              chatwootConversationId: body.conversation?.id,
             },
+            orderBy: { messageTimestamp: 'desc' },
           });
           if (lastMessage && !lastMessage.chatwootIsRead) {
             const key = lastMessage.key as WAMessageKey;
@@ -1706,6 +1766,7 @@ export class ChatwootService {
       'documentWithCaptionMessage',
       'audioMessage',
       'videoMessage',
+      'ptvMessage',
       'stickerMessage',
       'viewOnceMessageV2',
     ];
@@ -1762,6 +1823,7 @@ export class ChatwootService {
       conversation: msg.conversation,
       imageMessage: msg.imageMessage?.caption,
       videoMessage: msg.videoMessage?.caption,
+      ptvMessage: msg.ptvMessage ? (msg.ptvMessage.caption ?? '') : undefined,
       extendedTextMessage: msg.extendedTextMessage?.text,
       messageContextInfo: msg.messageContextInfo?.stanzaId,
       stickerMessage: undefined,

@@ -251,6 +251,7 @@ export class BaileysStartupService extends ChannelStartupService {
   private endSession = false;
   private logBaileys = this.configService.get<Log>('LOG').BAILEYS;
   private eventProcessingQueue: Promise<void> = Promise.resolve();
+  private reconnectAttempts = 0;
 
   // Cache TTL constants (in seconds)
   private readonly MESSAGE_CACHE_TTL_SECONDS = 5 * 60; // 5 minutes - avoid duplicate message processing
@@ -428,6 +429,12 @@ export class BaileysStartupService extends ChannelStartupService {
       const codesToNotReconnect = [DisconnectReason.loggedOut, DisconnectReason.forbidden, 402, 406];
       const shouldReconnect = !codesToNotReconnect.includes(statusCode);
       if (shouldReconnect) {
+        this.reconnectAttempts = (this.reconnectAttempts ?? 0) + 1;
+        const backoffMs = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000);
+        this.logger.warn(
+          `Reconnect attempt ${this.reconnectAttempts} for ${this.instance.name} in ${backoffMs}ms (reason: ${statusCode})`,
+        );
+        await delay(backoffMs);
         await this.connectToWhatsapp(this.phoneNumber);
       } else {
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
@@ -465,6 +472,7 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     if (connection === 'open') {
+      this.reconnectAttempts = 0;
       this.instance.wuid = this.client.user.id.replace(/:\d+/, '');
       try {
         const profilePic = await this.profilePicture(this.instance.wuid);
@@ -1480,14 +1488,38 @@ export class BaileysStartupService extends ChannelStartupService {
           }
           console.log(messageRaw);
 
+          // Sanity check: for group messages we can independently derive the sender from
+          // `participant`, unlike 1:1 chats where remoteJid is always the counterparty
+          // regardless of direction. Baileys' own `key.fromMe` is known to be occasionally
+          // unreliable for synced/append messages (multi-device), so we only log a mismatch
+          // here rather than override the value blindly.
+          if (messageRaw.key.participant && this.instance.wuid) {
+            const normalizeJid = (jid: string) => jid?.split(':')[0]?.split('@')[0];
+            const isSelfParticipant = normalizeJid(messageRaw.key.participant) === normalizeJid(this.instance.wuid);
+
+            if (isSelfParticipant !== !!messageRaw.key.fromMe) {
+              this.logger.warn({
+                local: 'messages.upsert.fromMeCheck',
+                message: 'fromMe mismatch: Baileys key.fromMe disagrees with participant vs own JID',
+                fromMe: messageRaw.key.fromMe,
+                participant: messageRaw.key.participant,
+                ownJid: this.instance.wuid,
+                remoteJid: messageRaw.key.remoteJid,
+                messageId: messageRaw.key.id,
+              });
+            }
+          }
+
           this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
-          await chatbotController.emit({
-            instance: { instanceName: this.instance.name, instanceId: this.instanceId },
-            remoteJid: messageRaw.key.remoteJid,
-            msg: messageRaw,
-            pushName: messageRaw.pushName,
-          });
+          if (!messageRaw.key.fromMe) {
+            await chatbotController.emit({
+              instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+              remoteJid: messageRaw.key.remoteJid,
+              msg: messageRaw,
+              pushName: messageRaw.pushName,
+            });
+          }
 
           const contact = await this.prismaRepository.contact.findFirst({
             where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
@@ -1900,7 +1932,13 @@ export class BaileysStartupService extends ChannelStartupService {
             }
 
             if (events['connection.update']) {
-              this.connectionUpdate(events['connection.update']);
+              this.connectionUpdate(events['connection.update']).catch((error) => {
+                this.logger.error({
+                  local: 'connectionUpdate',
+                  message: `Unhandled error while processing connection update: ${error?.message}`,
+                  stack: error?.stack,
+                });
+              });
             }
 
             if (events['creds.update']) {

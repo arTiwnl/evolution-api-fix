@@ -25,21 +25,27 @@ export async function keyExists(sessionId: string): Promise<any> {
   }
 }
 
-export async function saveKey(sessionId: string, keyJson: any): Promise<any> {
+export async function saveKey(sessionId: string, keyJson: string): Promise<any> {
+  // `keyJson` arrives already serialized (writeData does JSON.stringify(data, BufferJSON.replacer)
+  // before calling this) - stringifying it again here would double-encode the value, turning
+  // it into a JSON string *of* a JSON string. On read, a single JSON.parse only undoes one layer,
+  // leaving `creds` as a plain string instead of the parsed object - Baileys then crashes reading
+  // `creds.noiseKey.public` on that string (`noiseKey` is `undefined` on a string).
   const exists = await keyExists(sessionId);
   try {
     if (!exists)
       return await prismaRepository.session.create({
         data: {
           sessionId: sessionId,
-          creds: JSON.stringify(keyJson),
+          creds: keyJson,
         },
       });
     await prismaRepository.session.update({
       where: { sessionId: sessionId },
-      data: { creds: JSON.stringify(keyJson) },
+      data: { creds: keyJson },
     });
-  } catch {
+  } catch (err) {
+    logger.error({ action: 'auth.key.save', sessionId, err });
     return null;
   }
 }
@@ -49,7 +55,7 @@ export async function getAuthKey(sessionId: string): Promise<any> {
     const register = await keyExists(sessionId);
     if (!register) return null;
     const auth = await prismaRepository.session.findUnique({ where: { sessionId: sessionId } });
-    return JSON.parse(auth?.creds);
+    return auth?.creds;
   } catch {
     return null;
   }
@@ -121,7 +127,18 @@ export default async function useMultiFileAuthStatePrisma(
         rawData = await getAuthKey(sessionId);
       }
 
-      const parsedData = JSON.parse(rawData, BufferJSON.reviver);
+      let parsedData = JSON.parse(rawData, BufferJSON.reviver);
+
+      // Self-heal rows written by the previous double-stringify bug in saveKey(): those
+      // values need a second JSON.parse to reach the real object. A correctly-written
+      // row parses straight to an object, so this only ever triggers on legacy data.
+      if (typeof parsedData === 'string') {
+        parsedData = JSON.parse(parsedData, BufferJSON.reviver);
+        if (key === 'creds') {
+          await saveKey(sessionId, JSON.stringify(parsedData, BufferJSON.replacer));
+        }
+      }
+
       return parsedData;
     } catch {
       return null;

@@ -6,6 +6,7 @@ import { configService, Log, Webhook } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 // import { BadRequestException } from '@exceptions';
 import axios, { AxiosInstance } from 'axios';
+import { randomUUID } from 'crypto';
 import * as jwt from 'jsonwebtoken';
 
 import { EmitData, EventController, EventControllerInterface } from '../event.controller';
@@ -90,8 +91,13 @@ export class WebhookController extends EventController implements EventControlle
     const enabledLog = configService.get<Log>('LOG').LEVEL.includes('WEBHOOKS');
     const regex = /^(https?:\/\/)/;
 
+    // Stable id so receivers can dedupe retried/duplicated deliveries of the same logical event.
+    const messageKeyId = (data as any)?.key?.id;
+    const webhookId = messageKeyId ? `${instanceName}:${we}:${messageKeyId}` : randomUUID();
+
     const webhookData = {
       ...(extra ?? {}),
+      webhookId,
       event,
       instance: instanceName,
       data,
@@ -102,6 +108,8 @@ export class WebhookController extends EventController implements EventControlle
       apikey: apiKey,
     };
 
+    let localBaseURL: string;
+
     if (local && instance?.enabled) {
       if (Array.isArray(webhookLocal) && webhookLocal.includes(we)) {
         let baseURL: string;
@@ -111,6 +119,8 @@ export class WebhookController extends EventController implements EventControlle
         } else {
           baseURL = instance?.url;
         }
+
+        localBaseURL = baseURL;
 
         if (enabledLog) {
           const logData = {
@@ -155,6 +165,15 @@ export class WebhookController extends EventController implements EventControlle
 
         if (webhookConfig.GLOBAL.WEBHOOK_BY_EVENTS) {
           globalURL = `${globalURL}/${transformedWe}`;
+        }
+
+        if (localBaseURL && localBaseURL === globalURL) {
+          this.logger.log({
+            local: `${origin}.sendData-Webhook-Global`,
+            message: 'Skipped: same URL as local webhook already sent for this event',
+            url: globalURL,
+          });
+          return;
         }
 
         if (enabledLog) {
