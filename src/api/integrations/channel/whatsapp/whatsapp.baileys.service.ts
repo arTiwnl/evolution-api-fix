@@ -540,6 +540,12 @@ export class BaileysStartupService extends ChannelStartupService {
       if (full) {
         return webMessageInfo[0];
       }
+      if (!webMessageInfo[0]) {
+        // Baileys treats any truthy return as "message found" and re-sends it on a retry receipt,
+        // so returning an empty message here would re-send a blank message to the peer.
+        return undefined;
+      }
+
       if (webMessageInfo[0].message?.pollCreationMessage) {
         const messageSecretBase64 = webMessageInfo[0].message?.messageContextInfo?.messageSecret;
 
@@ -557,7 +563,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
       return webMessageInfo[0].message;
     } catch {
-      return { conversation: '' };
+      return full ? { conversation: '' } : undefined;
     }
   }
 
