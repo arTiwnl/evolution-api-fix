@@ -9,6 +9,7 @@ Este é um fork do [Evolution API](https://github.com/EvolutionAPI/evolution-api
 
 ```
 artiwnl/evolution-api:fixed
+artiwnl/evolution-api:2.3.7-fixed
 ```
 
 Já inclui o Manager corrigido embutido em `/manager`.
@@ -91,6 +92,15 @@ Mensagens `fromMe: true` (enviadas pela própria instância, inclusive sync de o
 
 #### 16. Checagem de integridade do campo `fromMe`
 Para mensagens de grupo, adicionado um log de aviso (não altera comportamento) quando o `participant` da mensagem bate com o próprio número da instância mas o Baileys diz `fromMe: false` (ou vice-versa) — ajuda a diagnosticar inconsistências reportadas na lib.
+
+### 🔵 Baileys
+
+#### 17. Mensagens em branco reenviadas em retry receipts
+**Arquivo:** `src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts`
+
+O Baileys chama `getMessage` quando um contato não consegue descriptografar uma mensagem (retry receipt) e trata qualquer retorno verdadeiro como "mensagem encontrada", reenviando-a. Quando a mensagem não existia no banco (ou a busca falhava), o código devolvia `{ conversation: '' }`, o que fazia o Baileys **reenviar uma mensagem em branco** para contatos com a sessão Signal quebrada.
+
+**Correção:** `getMessage` agora retorna `undefined` quando a mensagem não é encontrada (ou em caso de erro), e o Baileys não reenvia nada. Chamadas internas (`full=true`) mantêm o comportamento anterior.
 
 ---
 
