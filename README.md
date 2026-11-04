@@ -128,3 +128,4 @@ Correções em [`evolution-manager-v2`](./evolution-manager-v2):
 8. **Exclusão de bots (Typebot/OpenAI/Dify/N8n/EvolutionBot/Flowise/Evoai) falhava em silêncio** — erro só ia pro console, sem avisar o usuário.
 9. **Redirecionamento errado após login** — usuário já autenticado acessando `/manager/login` caía na página de marketing (`/`) em vez do dashboard (`/manager/`).
 10. **Aviso de versão do Baileys** — novo componente que avisa (com link pro changelog) quando o Baileys do servidor está desatualizado, ou confirma quando está em dia.
+11. **Cor primária azul (`#023e8a`)** — o verde padrão do `@evoapi/design-system` foi substituído por `#023e8a` (botões, destaques e sidebar) via override de `--primary` em `src/index.css`, nos temas claro e escuro. O verde de status "conectado" foi mantido.
