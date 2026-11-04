@@ -9,7 +9,7 @@ Este é um fork do [Evolution API](https://github.com/EvolutionAPI/evolution-api
 
 ```
 artiwnl/evolution-api:fixed
-artiwnl/evolution-api:2.3.7-fixed
+artiwnl/evolution-api:2.3.8-fixed
 ```
 
 Já inclui o Manager corrigido embutido em `/manager`.
@@ -101,6 +101,16 @@ Para mensagens de grupo, adicionado um log de aviso (não altera comportamento) 
 O Baileys chama `getMessage` quando um contato não consegue descriptografar uma mensagem (retry receipt) e trata qualquer retorno verdadeiro como "mensagem encontrada", reenviando-a. Quando a mensagem não existia no banco (ou a busca falhava), o código devolvia `{ conversation: '' }`, o que fazia o Baileys **reenviar uma mensagem em branco** para contatos com a sessão Signal quebrada.
 
 **Correção:** `getMessage` agora retorna `undefined` quando a mensagem não é encontrada (ou em caso de erro), e o Baileys não reenvia nada. Chamadas internas (`full=true`) mantêm o comportamento anterior.
+
+#### 18. Webhook `MESSAGES_UPSERT` / `SEND_MESSAGE` perdido com S3 ativado
+**Arquivo:** `src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts`
+
+Com `S3_ENABLED=true`, três `return` dentro do bloco de upload abortavam o tratamento inteiro da mensagem, e não só o upload:
+- mídia que chegava só como `messageContextInfo` (ou cujo download falhava) era salva no banco, mas o webhook `messages.upsert` nunca era emitido;
+- com `S3_SAVE_VIDEO=false`, todo vídeo recebido também ficava sem webhook;
+- no envio (`sendMessageWithTyping`), o mesmo `return` fazia a chamada retornar `undefined` e pulava o webhook `send.message`.
+
+**Correção:** esses casos agora pulam apenas o upload ao S3; o webhook e a resposta da API seguem normalmente (ref. issue [#2768](https://github.com/evolution-foundation/evolution-api/issues/2768) do upstream).
 
 ---
 
