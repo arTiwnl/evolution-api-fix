@@ -49,6 +49,7 @@ function payload(instance: any) {
   const qr = state === 'connecting' ? instance.qrCode : undefined;
   return {
     state,
+    hasNumber: !!String(instance?.number ?? '').replace(/\D/g, ''),
     number: state === 'open' ? String(instance.wuid ?? '').split('@')[0] : undefined,
     pairingCode: qr?.pairingCode ?? null,
     qrcode: qr?.base64 ?? null,
@@ -76,7 +77,10 @@ export class ConnectRouter {
       const { name, instance } = found;
 
       try {
-        const number = String(req.body?.number ?? '').replace(/\D/g, '') || null;
+        const number =
+          String(req.body?.number ?? '').replace(/\D/g, '') ||
+          String(instance?.number ?? '').replace(/\D/g, '') ||
+          null;
         const state = instance?.connectionStatus?.state;
 
         if (state === 'open') return res.json(payload(instance));

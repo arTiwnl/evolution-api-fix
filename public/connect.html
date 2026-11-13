@@ -69,6 +69,7 @@ let instance = (params.get('instance') || '').trim();
 let password = '';
 let mode = 'code';
 let timer = null;
+let hasNumber = false;
 
 if (instance) { $('inst').value = instance; $('instLabel').hidden = true; $('inst').hidden = true; }
 
@@ -117,6 +118,8 @@ $('enter').onclick = async () => {
   $('enter').disabled = true; say('');
   try {
     const d = await api('status');
+    hasNumber = !!d.hasNumber;
+    $('numBox').hidden = hasNumber;
     $('login').hidden = true; $('connect').hidden = false; $('sub').textContent = 'Siga os passos para conectar seu WhatsApp.';
     if (d.state === 'open') render(d);
     else if (d.state === 'connecting') { render(d); poll(); }
@@ -128,7 +131,7 @@ $('pwd').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('enter').
 function setMode(m) {
   mode = m;
   $('tabCode').classList.toggle('on', m === 'code'); $('tabQr').classList.toggle('on', m === 'qr');
-  $('numBox').hidden = m !== 'code';
+  $('numBox').hidden = m !== 'code' || hasNumber;
   $('start').textContent = m === 'code' ? 'Gerar código' : 'Gerar QR Code';
   $('result').hidden = true; $('steps').hidden = true; say('');
 }
@@ -137,11 +140,11 @@ $('tabQr').onclick = () => setMode('qr');
 
 $('start').onclick = async () => {
   const number = $('num').value.replace(/\D/g, '');
-  if (mode === 'code' && number.length < 10) return say('Informe o número com DDD.', 'err');
+  if (mode === 'code' && !hasNumber && number.length < 10) return say('Informe o número com DDD.', 'err');
   const full = mode === 'code' && number.length <= 11 ? '55' + number : number;
   $('start').disabled = true; say('Gerando, aguarde…');
   try {
-    render(await api('start', { number: mode === 'code' ? full : '' }));
+    render(await api('start', { number: mode === 'code' && !hasNumber ? full : '' }));
     say(''); poll();
   } catch (e) { say(e.message, 'err'); }
   $('start').disabled = false;
