@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Conectar WhatsApp</title>
+<style>
+  :root { --bg:#f4f6fb; --card:#fff; --fg:#14213d; --muted:#64708a; --primary:#023e8a; --ok:#1a7f45; --err:#c0392b; --line:#dfe4ee; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0e1424; --card:#161e33; --fg:#eef1f8; --muted:#9aa5bf; --primary:#4c8dff; --ok:#3ecf7a; --err:#ff6b5b; --line:#27314d; } }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; padding:16px; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  .card { width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:16px; padding:28px 24px; }
+  h1 { font-size:1.35rem; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 20px; font-size:.95rem; }
+  label { display:block; font-size:.85rem; color:var(--muted); margin:14px 0 6px; }
+  input { width:100%; padding:12px 14px; border:1px solid var(--line); border-radius:10px; background:transparent; color:var(--fg); font-size:1rem; }
+  input:focus { outline:2px solid var(--primary); border-color:transparent; }
+  button { width:100%; margin-top:18px; padding:13px; border:0; border-radius:10px; background:var(--primary); color:#fff; font-size:1rem; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--primary); border:1px solid var(--line); margin-top:10px; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .tabs { display:flex; gap:8px; margin:6px 0 4px; }
+  .tabs button { margin:0; background:transparent; color:var(--fg); border:1px solid var(--line); }
+  .tabs button.on { background:var(--primary); color:#fff; border-color:var(--primary); }
+  .center { text-align:center; }
+  .code { font:700 2.1rem/1.2 ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.12em; margin:18px 0 6px; user-select:all; }
+  .qr { width:240px; height:240px; margin:16px auto 6px; display:block; border-radius:8px; background:#fff; }
+  .msg { margin-top:14px; font-size:.9rem; color:var(--muted); }
+  .err { color:var(--err); } .ok { color:var(--ok); font-weight:600; }
+  ol { color:var(--muted); font-size:.88rem; padding-left:20px; margin:14px 0 0; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Conectar WhatsApp</h1>
+  <p class="sub" id="sub">Digite a senha para continuar.</p>
+
+  <section id="login">
+    <label for="inst" id="instLabel">Instância</label>
+    <input id="inst" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <label for="pwd">Senha</label>
+    <input id="pwd" type="password" autocomplete="current-password">
+    <button id="enter">Entrar</button>
+  </section>
+
+  <section id="connect" hidden>
+    <div class="tabs">
+      <button id="tabCode" class="on">Código</button>
+      <button id="tabQr">QR Code</button>
+    </div>
+    <div id="numBox">
+      <label for="num">Número do WhatsApp (com DDD)</label>
+      <input id="num" inputmode="numeric" placeholder="11999999999">
+    </div>
+    <button id="start">Gerar código</button>
+
+    <div id="result" class="center" hidden></div>
+    <ol id="steps" hidden></ol>
+  </section>
+
+  <p class="msg center" id="msg"></p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+let instance = (params.get('instance') || '').trim();
+let password = '';
+let mode = 'code';
+let timer = null;
+
+if (instance) { $('inst').value = instance; $('instLabel').hidden = true; $('inst').hidden = true; }
+
+function say(text, cls) { const m = $('msg'); m.textContent = text || ''; m.className = 'msg center ' + (cls || ''); }
+
+async function api(path, body) {
+  const r = await fetch('/connect/api/' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instance, password, ...body }) });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(data.error || 'Erro inesperado'), { status: r.status });
+  return data;
+}
+
+function render(d) {
+  const res = $('result'), steps = $('steps');
+  if (d.state === 'open') {
+    clearInterval(timer);
+    res.hidden = false; steps.hidden = true; $('start').hidden = true; $('numBox').hidden = true;
+    res.innerHTML = '<p class="ok" style="font-size:1.2rem">✅ WhatsApp conectado!</p>' + (d.number ? '<p class="sub">Número: +' + d.number + '</p>' : '');
+    say('');
+    return;
+  }
+  if (d.state !== 'connecting') return;
+  if (mode === 'code' && d.pairingCode) {
+    const c = d.pairingCode.replace(/(.{4})(?=.)/, '$1-');
+    res.hidden = false; res.innerHTML = '<div class="code">' + c + '</div><div class="sub">Código válido por poucos instantes</div>';
+    steps.hidden = false;
+    steps.innerHTML = '<li>Abra o WhatsApp no celular</li><li>Toque em <b>Aparelhos conectados</b> → <b>Conectar um aparelho</b></li><li>Escolha <b>Conectar com número de telefone</b></li><li>Digite o código acima</li>';
+  } else if (mode === 'qr' && d.qrcode) {
+    res.hidden = false; res.innerHTML = '<img class="qr" alt="QR Code" src="' + d.qrcode + '">';
+    steps.hidden = false;
+    steps.innerHTML = '<li>Abra o WhatsApp no celular</li><li>Toque em <b>Aparelhos conectados</b> → <b>Conectar um aparelho</b></li><li>Aponte a câmera para o QR Code</li>';
+  } else {
+    res.hidden = false; res.innerHTML = '<p class="sub">Gerando…</p>'; steps.hidden = true;
+  }
+}
+
+function poll() {
+  clearInterval(timer);
+  timer = setInterval(async () => { try { render(await api('status')); } catch (e) { say(e.message, 'err'); } }, 3000);
+}
+
+$('enter').onclick = async () => {
+  instance = instance || $('inst').value.trim();
+  password = $('pwd').value;
+  if (!instance || !password) return say('Preencha todos os campos.', 'err');
+  $('enter').disabled = true; say('');
+  try {
+    const d = await api('status');
+    $('login').hidden = true; $('connect').hidden = false; $('sub').textContent = 'Siga os passos para conectar seu WhatsApp.';
+    if (d.state === 'open') render(d);
+    else if (d.state === 'connecting') { render(d); poll(); }
+  } catch (e) { say(e.message, 'err'); }
+  $('enter').disabled = false;
+};
+$('pwd').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('enter').click(); });
+
+function setMode(m) {
+  mode = m;
+  $('tabCode').classList.toggle('on', m === 'code'); $('tabQr').classList.toggle('on', m === 'qr');
+  $('numBox').hidden = m !== 'code';
+  $('start').textContent = m === 'code' ? 'Gerar código' : 'Gerar QR Code';
+  $('result').hidden = true; $('steps').hidden = true; say('');
+}
+$('tabCode').onclick = () => setMode('code');
+$('tabQr').onclick = () => setMode('qr');
+
+$('start').onclick = async () => {
+  const number = $('num').value.replace(/\D/g, '');
+  if (mode === 'code' && number.length < 10) return say('Informe o número com DDD.', 'err');
+  const full = mode === 'code' && number.length <= 11 ? '55' + number : number;
+  $('start').disabled = true; say('Gerando, aguarde…');
+  try {
+    render(await api('start', { number: mode === 'code' ? full : '' }));
+    say(''); poll();
+  } catch (e) { say(e.message, 'err'); }
+  $('start').disabled = false;
+};
+</script>
+</body>
+</html>

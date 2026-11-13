@@ -17,6 +17,7 @@ import path from 'path';
 import { BusinessRouter } from './business.router';
 import { CallRouter } from './call.router';
 import { ChatRouter } from './chat.router';
+import { ConnectRouter } from './connect.router';
 import { GroupRouter } from './group.router';
 import { InstanceRouter } from './instance.router';
 import { LabelRouter } from './label.router';
@@ -160,6 +161,8 @@ if (metricsConfig.ENABLED) {
     res.send(lines.join('\n') + '\n');
   });
 }
+
+router.use('/connect', new ConnectRouter().router);
 
 if (!serverConfig.DISABLE_MANAGER) router.use('/manager', new ViewsRouter().router);
 
