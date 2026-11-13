@@ -375,7 +375,19 @@ export class BaileysStartupService extends ChannelStartupService {
 
       if (this.phoneNumber) {
         await delay(1000);
-        this.instance.qrcode.pairingCode = await this.client.requestPairingCode(this.phoneNumber);
+        const pairingNumber = this.phoneNumber.replace(/\D/g, '');
+        let pairingCode: string | null = null;
+        for (let attempt = 1; attempt <= 3 && !pairingCode; attempt++) {
+          try {
+            pairingCode = await this.client.requestPairingCode(pairingNumber);
+          } catch (error) {
+            this.logger.warn(
+              `Pairing code attempt ${attempt}/3 failed for ${this.instance.name}: ${error?.message ?? error}`,
+            );
+            if (attempt < 3) await delay(1500 * attempt);
+          }
+        }
+        this.instance.qrcode.pairingCode = pairingCode;
       } else {
         this.instance.qrcode.pairingCode = null;
       }
@@ -595,6 +607,7 @@ export class BaileysStartupService extends ChannelStartupService {
     let browserOptions = {};
 
     if (number || this.phoneNumber) {
+      number = number || this.phoneNumber;
       this.phoneNumber = number;
 
       this.logger.info(`Phone number: ${number}`);

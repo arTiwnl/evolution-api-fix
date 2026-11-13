@@ -319,7 +319,13 @@ export class InstanceController {
         return await this.connectionState({ instanceName });
       }
 
+      const waitForPairingCode = async () => {
+        if (!number && !instance.phoneNumber) return;
+        for (let i = 0; i < 20 && !instance.qrCode?.pairingCode; i++) await delay(500);
+      };
+
       if (state == 'connecting') {
+        await waitForPairingCode();
         return instance.qrCode;
       }
 
@@ -327,6 +333,7 @@ export class InstanceController {
         await instance.connectToWhatsapp(number);
 
         await delay(2000);
+        await waitForPairingCode();
         return instance.qrCode;
       }
 
