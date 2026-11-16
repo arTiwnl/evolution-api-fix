@@ -1342,126 +1342,146 @@ export class BaileysStartupService extends ChannelStartupService {
 
           const isVideo = received?.message?.videoMessage;
 
-          if (this.localSettings.readMessages && received.key.id !== 'status@broadcast') {
-            await this.client.readMessages([received.key]);
-          }
-
-          if (this.localSettings.readStatus && received.key.id === 'status@broadcast') {
-            await this.client.readMessages([received.key]);
-          }
-
-          if (
-            this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
-            this.localChatwoot?.enabled &&
-            !received.key.id.includes('@broadcast')
-          ) {
-            const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
-              Events.MESSAGES_UPSERT,
-              { instanceName: this.instance.name, instanceId: this.instanceId },
-              messageRaw,
-            );
-
-            if (chatwootSentMessage?.id) {
-              messageRaw.chatwootMessageId = chatwootSentMessage.id;
-              messageRaw.chatwootInboxId = chatwootSentMessage.inbox_id;
-              messageRaw.chatwootConversationId = chatwootSentMessage.conversation_id;
+          // Pre-webhook steps are best-effort: a failure here must never prevent the
+          // messages.upsert webhook from being emitted (it used to drop the whole batch).
+          try {
+            if (this.localSettings.readMessages && received.key.id !== 'status@broadcast') {
+              await this.client.readMessages([received.key]);
             }
+
+            if (this.localSettings.readStatus && received.key.id === 'status@broadcast') {
+              await this.client.readMessages([received.key]);
+            }
+          } catch (error) {
+            this.logger.error(['Error marking message as read', error?.message]);
           }
 
-          if (this.configService.get<Openai>('OPENAI').ENABLED && received?.message?.audioMessage) {
-            const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
-              where: { instanceId: this.instanceId },
-              include: { OpenaiCreds: true },
-            });
+          try {
+            if (
+              this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
+              this.localChatwoot?.enabled &&
+              !received.key.id.includes('@broadcast')
+            ) {
+              const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
+                Events.MESSAGES_UPSERT,
+                { instanceName: this.instance.name, instanceId: this.instanceId },
+                messageRaw,
+              );
 
-            if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
-              messageRaw.message.speechToText = `[audio] ${await this.openaiService.speechToText(received, this)}`;
+              if (chatwootSentMessage?.id) {
+                messageRaw.chatwootMessageId = chatwootSentMessage.id;
+                messageRaw.chatwootInboxId = chatwootSentMessage.inbox_id;
+                messageRaw.chatwootConversationId = chatwootSentMessage.conversation_id;
+              }
             }
+          } catch (error) {
+            this.logger.error(['Error sending message to Chatwoot', error?.message]);
+          }
+
+          try {
+            if (this.configService.get<Openai>('OPENAI').ENABLED && received?.message?.audioMessage) {
+              const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
+                where: { instanceId: this.instanceId },
+                include: { OpenaiCreds: true },
+              });
+
+              if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
+                messageRaw.message.speechToText = `[audio] ${await this.openaiService.speechToText(received, this)}`;
+              }
+            }
+          } catch (error) {
+            this.logger.error(['Error transcribing audio', error?.message]);
           }
 
           if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
-            // eslint-disable-next-line @typescript-eslint/no-unused-vars
-            const { pollUpdates, ...messageData } = messageRaw;
-            const msg = await this.prismaRepository.message.create({ data: messageData });
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              const { pollUpdates, ...messageData } = messageRaw;
+              const msg = await this.prismaRepository.message.create({ data: messageData });
 
-            const { remoteJid } = received.key;
-            const timestamp = msg.messageTimestamp;
-            const fromMe = received.key.fromMe.toString();
-            const messageKey = `${remoteJid}_${timestamp}_${fromMe}`;
+              const { remoteJid } = received.key;
+              const timestamp = msg.messageTimestamp;
+              const fromMe = received.key.fromMe.toString();
+              const messageKey = `${remoteJid}_${timestamp}_${fromMe}`;
 
-            const cachedTimestamp = await this.baileysCache.get(messageKey);
+              const cachedTimestamp = await this.baileysCache.get(messageKey);
 
-            if (!cachedTimestamp) {
-              if (!received.key.fromMe) {
-                if (msg.status === status[3]) {
-                  this.logger.log(`Update not read messages ${remoteJid}`);
-                  await this.updateChatUnreadMessages(remoteJid);
-                } else if (msg.status === status[4]) {
+              if (!cachedTimestamp) {
+                if (!received.key.fromMe) {
+                  if (msg.status === status[3]) {
+                    this.logger.log(`Update not read messages ${remoteJid}`);
+                    await this.updateChatUnreadMessages(remoteJid);
+                  } else if (msg.status === status[4]) {
+                    this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
+                    await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
+                  }
+                } else {
+                  // is send message by me
                   this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
                   await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
                 }
+
+                await this.baileysCache.set(messageKey, true, this.MESSAGE_CACHE_TTL_SECONDS);
               } else {
-                // is send message by me
-                this.logger.log(`Update readed messages ${remoteJid} - ${timestamp}`);
-                await this.updateMessagesReadedByTimestamp(remoteJid, timestamp);
+                this.logger.info(`Update readed messages duplicated ignored [avoid deadlock]: ${messageKey}`);
               }
 
-              await this.baileysCache.set(messageKey, true, this.MESSAGE_CACHE_TTL_SECONDS);
-            } else {
-              this.logger.info(`Update readed messages duplicated ignored [avoid deadlock]: ${messageKey}`);
-            }
+              if (isMedia) {
+                if (this.configService.get<S3>('S3').ENABLE) {
+                  try {
+                    const message: any = received;
 
-            if (isMedia) {
-              if (this.configService.get<S3>('S3').ENABLE) {
-                try {
-                  const message: any = received;
+                    // Verificação adicional para garantir que há conteúdo de mídia real
+                    const hasRealMedia = this.hasValidMediaContent(message);
 
-                  // Verificação adicional para garantir que há conteúdo de mídia real
-                  const hasRealMedia = this.hasValidMediaContent(message);
-
-                  if (isVideo && !this.configService.get<S3>('S3').SAVE_VIDEO) {
-                    // Skip only the upload; the webhook below must still be emitted
-                    this.logger.warn('Video upload is disabled. Skipping video upload.');
-                  } else if (!hasRealMedia) {
-                    this.logger.warn('Message detected as media but contains no valid media content');
-                  } else {
-                    const media = await this.getBase64FromMediaMessage({ message }, true);
-
-                    if (!media) {
-                      // Skip only the upload; returning here would drop the messages.upsert webhook
-                      this.logger.verbose('No valid media to upload (messageContextInfo only), skipping MinIO');
+                    if (isVideo && !this.configService.get<S3>('S3').SAVE_VIDEO) {
+                      // Skip only the upload; the webhook below must still be emitted
+                      this.logger.warn('Video upload is disabled. Skipping video upload.');
+                    } else if (!hasRealMedia) {
+                      this.logger.warn('Message detected as media but contains no valid media content');
                     } else {
-                      const { buffer, mediaType, fileName, size } = media;
-                      const mimetype = mimeTypes.lookup(fileName).toString();
-                      const fullName = join(
-                        `${this.instance.id}`,
-                        received.key.remoteJid,
-                        mediaType,
-                        `${Date.now()}_${fileName}`,
-                      );
-                      await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, { 'Content-Type': mimetype });
+                      const media = await this.getBase64FromMediaMessage({ message }, true);
 
-                      await this.prismaRepository.media.create({
-                        data: {
-                          messageId: msg.id,
-                          instanceId: this.instanceId,
-                          type: mediaType,
-                          fileName: fullName,
-                          mimetype,
-                        },
-                      });
+                      if (!media) {
+                        // Skip only the upload; returning here would drop the messages.upsert webhook
+                        this.logger.verbose('No valid media to upload (messageContextInfo only), skipping MinIO');
+                      } else {
+                        const { buffer, mediaType, fileName, size } = media;
+                        const mimetype = mimeTypes.lookup(fileName).toString();
+                        const fullName = join(
+                          `${this.instance.id}`,
+                          received.key.remoteJid,
+                          mediaType,
+                          `${Date.now()}_${fileName}`,
+                        );
+                        await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, {
+                          'Content-Type': mimetype,
+                        });
 
-                      const mediaUrl = await s3Service.getObjectUrl(fullName);
+                        await this.prismaRepository.media.create({
+                          data: {
+                            messageId: msg.id,
+                            instanceId: this.instanceId,
+                            type: mediaType,
+                            fileName: fullName,
+                            mimetype,
+                          },
+                        });
 
-                      messageRaw.message.mediaUrl = mediaUrl;
+                        const mediaUrl = await s3Service.getObjectUrl(fullName);
 
-                      await this.prismaRepository.message.update({ where: { id: msg.id }, data: messageRaw });
+                        messageRaw.message.mediaUrl = mediaUrl;
+
+                        await this.prismaRepository.message.update({ where: { id: msg.id }, data: messageRaw });
+                      }
                     }
+                  } catch (error) {
+                    this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
                   }
-                } catch (error) {
-                  this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
                 }
               }
+            } catch (error) {
+              this.logger.error(['Error saving message to database', error?.message, error?.stack]);
             }
           }
 
@@ -1529,74 +1549,84 @@ export class BaileysStartupService extends ChannelStartupService {
           this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
           if (!messageRaw.key.fromMe) {
-            await chatbotController.emit({
-              instance: { instanceName: this.instance.name, instanceId: this.instanceId },
-              remoteJid: messageRaw.key.remoteJid,
-              msg: messageRaw,
-              pushName: messageRaw.pushName,
-            });
-          }
-
-          const contact = await this.prismaRepository.contact.findFirst({
-            where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
-          });
-
-          const contactRaw: {
-            remoteJid: string;
-            pushName: string;
-            profilePicUrl?: string;
-            instanceId: string;
-          } = {
-            remoteJid: received.key.remoteJid,
-            pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
-            profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
-            instanceId: this.instanceId,
-          };
-
-          if (contactRaw.remoteJid === 'status@broadcast') {
-            continue;
-          }
-
-          if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
-            await saveOnWhatsappCache([
-              {
-                remoteJid:
-                  messageRaw.key.addressingMode === 'lid' ? messageRaw.key.remoteJidAlt : messageRaw.key.remoteJid,
-                remoteJidAlt: messageRaw.key.remoteJidAlt,
-                lid: messageRaw.key.addressingMode === 'lid' ? 'lid' : null,
-              },
-            ]);
-          }
-
-          if (contact) {
-            this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
-
-            if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-              await this.chatwootService.eventWhatsapp(
-                Events.CONTACTS_UPDATE,
-                { instanceName: this.instance.name, instanceId: this.instanceId },
-                contactRaw,
-              );
+            try {
+              await chatbotController.emit({
+                instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+                remoteJid: messageRaw.key.remoteJid,
+                msg: messageRaw,
+                pushName: messageRaw.pushName,
+              });
+            } catch (error) {
+              this.logger.error(['Error emitting to chatbots', error?.message]);
             }
+          }
+
+          try {
+            const contact = await this.prismaRepository.contact.findFirst({
+              where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
+            });
+
+            const contactRaw: {
+              remoteJid: string;
+              pushName: string;
+              profilePicUrl?: string;
+              instanceId: string;
+            } = {
+              remoteJid: received.key.remoteJid,
+              pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
+              profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
+              instanceId: this.instanceId,
+            };
+
+            if (contactRaw.remoteJid === 'status@broadcast') {
+              continue;
+            }
+
+            if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
+              await saveOnWhatsappCache([
+                {
+                  remoteJid:
+                    messageRaw.key.addressingMode === 'lid' ? messageRaw.key.remoteJidAlt : messageRaw.key.remoteJid,
+                  remoteJidAlt: messageRaw.key.remoteJidAlt,
+                  lid: messageRaw.key.addressingMode === 'lid' ? 'lid' : null,
+                },
+              ]);
+            }
+
+            if (contact) {
+              this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
+
+              if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+                await this.chatwootService.eventWhatsapp(
+                  Events.CONTACTS_UPDATE,
+                  { instanceName: this.instance.name, instanceId: this.instanceId },
+                  contactRaw,
+                );
+              }
+
+              if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
+                await this.prismaRepository.contact.upsert({
+                  where: {
+                    remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId },
+                  },
+                  create: contactRaw,
+                  update: contactRaw,
+                });
+
+              continue;
+            }
+
+            this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
 
             if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
               await this.prismaRepository.contact.upsert({
                 where: { remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId } },
-                create: contactRaw,
                 update: contactRaw,
+                create: contactRaw,
               });
-
-            continue;
+          } catch (error) {
+            this.logger.error(['Error processing contact for message', error?.message]);
           }
-
-          this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
-
-          if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
-            await this.prismaRepository.contact.upsert({
-              where: { remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId } },
-              update: contactRaw,
-              create: contactRaw,
-            });
         }
       } catch (error) {
         this.logger.error(error);
