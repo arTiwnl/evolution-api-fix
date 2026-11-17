@@ -1548,85 +1548,26 @@ export class BaileysStartupService extends ChannelStartupService {
 
           this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
 
+          // Slow side effects run detached so they never hold up the event queue
+          // (and therefore the next incoming messages).
           if (!messageRaw.key.fromMe) {
-            try {
-              await chatbotController.emit({
+            chatbotController
+              .emit({
                 instance: { instanceName: this.instance.name, instanceId: this.instanceId },
                 remoteJid: messageRaw.key.remoteJid,
                 msg: messageRaw,
                 pushName: messageRaw.pushName,
-              });
-            } catch (error) {
-              this.logger.error(['Error emitting to chatbots', error?.message]);
-            }
+              })
+              .catch((error) => this.logger.error(['Error emitting to chatbots', error?.message]));
           }
 
-          try {
-            const contact = await this.prismaRepository.contact.findFirst({
-              where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
-            });
-
-            const contactRaw: {
-              remoteJid: string;
-              pushName: string;
-              profilePicUrl?: string;
-              instanceId: string;
-            } = {
-              remoteJid: received.key.remoteJid,
-              pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
-              profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
-              instanceId: this.instanceId,
-            };
-
-            if (contactRaw.remoteJid === 'status@broadcast') {
-              continue;
-            }
-
-            if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
-              await saveOnWhatsappCache([
-                {
-                  remoteJid:
-                    messageRaw.key.addressingMode === 'lid' ? messageRaw.key.remoteJidAlt : messageRaw.key.remoteJid,
-                  remoteJidAlt: messageRaw.key.remoteJidAlt,
-                  lid: messageRaw.key.addressingMode === 'lid' ? 'lid' : null,
-                },
-              ]);
-            }
-
-            if (contact) {
-              this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
-
-              if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-                await this.chatwootService.eventWhatsapp(
-                  Events.CONTACTS_UPDATE,
-                  { instanceName: this.instance.name, instanceId: this.instanceId },
-                  contactRaw,
-                );
-              }
-
-              if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
-                await this.prismaRepository.contact.upsert({
-                  where: {
-                    remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId },
-                  },
-                  create: contactRaw,
-                  update: contactRaw,
-                });
-
-              continue;
-            }
-
-            this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
-
-            if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS)
-              await this.prismaRepository.contact.upsert({
-                where: { remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId } },
-                update: contactRaw,
-                create: contactRaw,
-              });
-          } catch (error) {
-            this.logger.error(['Error processing contact for message', error?.message]);
+          if (received.key.remoteJid === 'status@broadcast') {
+            continue;
           }
+
+          void this.processContactFromMessage(received, messageRaw).catch((error) =>
+            this.logger.error(['Error processing contact for message', error?.message]),
+          );
         }
       } catch (error) {
         this.logger.error(error);
@@ -1949,6 +1890,56 @@ export class BaileysStartupService extends ChannelStartupService {
       });
     },
   };
+
+  private async processContactFromMessage(received: WAMessage, messageRaw: any) {
+    const contact = await this.prismaRepository.contact.findFirst({
+      where: { remoteJid: received.key.remoteJid, instanceId: this.instanceId },
+    });
+
+    const contactRaw: {
+      remoteJid: string;
+      pushName: string;
+      profilePicUrl?: string;
+      instanceId: string;
+    } = {
+      remoteJid: received.key.remoteJid,
+      pushName: received.key.fromMe ? '' : received.key.fromMe == null ? '' : received.pushName,
+      profilePicUrl: (await this.profilePicture(received.key.remoteJid)).profilePictureUrl,
+      instanceId: this.instanceId,
+    };
+
+    if (contactRaw.remoteJid.includes('@s.whatsapp') || contactRaw.remoteJid.includes('@lid')) {
+      await saveOnWhatsappCache([
+        {
+          remoteJid: messageRaw.key.addressingMode === 'lid' ? messageRaw.key.remoteJidAlt : messageRaw.key.remoteJid,
+          remoteJidAlt: messageRaw.key.remoteJidAlt,
+          lid: messageRaw.key.addressingMode === 'lid' ? 'lid' : null,
+        },
+      ]);
+    }
+
+    if (contact) {
+      this.sendDataWebhook(Events.CONTACTS_UPDATE, contactRaw);
+
+      if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
+        await this.chatwootService.eventWhatsapp(
+          Events.CONTACTS_UPDATE,
+          { instanceName: this.instance.name, instanceId: this.instanceId },
+          contactRaw,
+        );
+      }
+    } else {
+      this.sendDataWebhook(Events.CONTACTS_UPSERT, contactRaw);
+    }
+
+    if (this.configService.get<Database>('DATABASE').SAVE_DATA.CONTACTS) {
+      await this.prismaRepository.contact.upsert({
+        where: { remoteJid_instanceId: { remoteJid: contactRaw.remoteJid, instanceId: contactRaw.instanceId } },
+        create: contactRaw,
+        update: contactRaw,
+      });
+    }
+  }
 
   private eventHandler() {
     this.client.ev.process(async (events) => {
